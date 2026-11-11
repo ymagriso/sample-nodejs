@@ -14,3 +14,17 @@ A lightweight Node.js application. It features basic web endpoints, Prometheus m
 ## Prerequisites
 
 - Node.js (v22.1.0)
+
+## Development
+
+```bash
+npm ci          # install dependencies
+npm start       # run the server (PORT defaults to 8080)
+npm test        # run unit tests (node:test + supertest)
+npm run lint    # run ESLint
+```
+
+## CI
+
+GitHub Actions ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs on every pull request to `main`:
+lint, unit tests, `npm audit` (fails on high/critical), a server smoke test, and a Docker image build + container smoke test (no push).
