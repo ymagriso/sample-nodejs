@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same PR when new commits are pushed
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  build-and-test:
+    name: Lint, test & audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Smoke test (start server and probe endpoints)
+        env:
+          PORT: 8080
+        run: |
+          node app.js > server.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:$PORT/ready > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:$PORT/ready   | grep -q '^Ready$'
+          curl -sf http://localhost:$PORT/live    | grep -q '^Alive$'
+          curl -sf http://localhost:$PORT/my-app  | grep -q 'Hello, World!'
+          curl -sf http://localhost:$PORT/metrics | grep -q 'root_access_total'
+          echo "Smoke test passed"
+
+      - name: Server logs
+        if: always()
+        run: cat server.log || true
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: sample-nodejs:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container smoke test
+        run: |
+          docker run -d --name app -p 8080:8080 sample-nodejs:pr-${{ github.event.pull_request.number }}
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8080/ready > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:8080/live | grep -q '^Alive$'
+          echo "Container smoke test passed"
+
+      - name: Container logs
+        if: always()
+        run: docker logs app || true
