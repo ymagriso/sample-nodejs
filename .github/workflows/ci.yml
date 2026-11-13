@@ -12,87 +12,77 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  NODE_VERSION: '22'
-
 jobs:
-  build-and-test:
-    name: Lint, test & audit
+  release-guard:
+    name: Release version guard
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v7.1.0
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          node-version: '22'
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Lint
-        run: npm run lint
-
-      - name: Unit tests
-        run: npm test
-
-      - name: Dependency audit
-        run: npm audit --audit-level=high
-
-      - name: Smoke test (start server and probe endpoints)
+      - name: Validate release version and tag uniqueness
         env:
-          PORT: 8080
+          BASE_REF: ${{ github.base_ref }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          node app.js > server.log 2>&1 &
-          for i in $(seq 1 20); do
-            curl -sf http://localhost:$PORT/ready > /dev/null && break
-            sleep 1
-          done
-          curl -sf http://localhost:$PORT/ready   | grep -q '^Ready$'
-          curl -sf http://localhost:$PORT/live    | grep -q '^Alive$'
-          curl -sf http://localhost:$PORT/my-app  | grep -q 'Hello, World!'
-          curl -sf http://localhost:$PORT/metrics | grep -q 'root_access_total'
-          echo "Smoke test passed"
+          set -euo pipefail
+          git fetch origin "$BASE_REF" --tags --quiet
 
-      - name: Server logs
-        if: always()
-        run: cat server.log || true
+          BASE_SHA=$(git rev-parse "origin/${BASE_REF}")
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$PR_SHA")
 
-  docker-build:
-    name: Docker build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: build-and-test
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
+          read_pkg_version() {
+            git show "$1" | node -e "console.log(JSON.parse(require('fs').readFileSync(0, 'utf8')).version)"
+          }
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.1
+          BASE_VERSION=$(read_pkg_version "${BASE_SHA}:package.json")
+          ANCESTOR_VERSION=$(read_pkg_version "${MERGE_BASE}:package.json")
+          PR_VERSION=$(read_pkg_version "${PR_SHA}:package.json")
+          PR_LOCK_VERSION=$(read_pkg_version "${PR_SHA}:package-lock.json")
 
-      - name: Build image (no push)
-        uses: docker/build-push-action@v7.4.0
-        with:
-          context: .
-          push: false
-          load: true
-          tags: sample-nodejs:pr-${{ github.event.pull_request.number }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! [[ "$PR_VERSION" =~ $SEMVER_RE ]]; then
+            echo "::error::package.json version '$PR_VERSION' must follow semver (x.y.z or x.y.z-prerelease)."
+            exit 1
+          fi
 
-      - name: Container smoke test
-        run: |
-          docker run -d --name app -p 8080:8080 sample-nodejs:pr-${{ github.event.pull_request.number }}
-          for i in $(seq 1 20); do
-            curl -sf http://localhost:8080/ready > /dev/null && break
-            sleep 1
-          done
-          curl -sf http://localhost:8080/live | grep -q '^Alive$'
-          echo "Container smoke test passed"
+          if [ "$PR_VERSION" != "$PR_LOCK_VERSION" ]; then
+            echo "::error::package.json version ($PR_VERSION) does not match package-lock.json version ($PR_LOCK_VERSION). Run 'npm install --package-lock-only'."
+            exit 1
+          fi
 
-      - name: Container logs
-        if: always()
-        run: docker logs app || true
+          if [ "$PR_VERSION" != "$ANCESTOR_VERSION" ]; then
+            TARGET_VERSION="$PR_VERSION"
+            echo "PR manually changed version: $ANCESTOR_VERSION -> $TARGET_VERSION (base is $BASE_VERSION)"
+          else
+            if [[ "$BASE_VERSION" == *-* ]]; then
+              TARGET_VERSION="${BASE_VERSION%%-*}"
+            else
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+              TARGET_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
+            echo "PR left version unchanged ($ANCESTOR_VERSION); release on main ($BASE_VERSION) will bump to $TARGET_VERSION"
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v${TARGET_VERSION}" >/dev/null; then
+            echo "::error::Git tag v${TARGET_VERSION} already exists. Bump package.json to an unreleased version."
+            exit 1
+          fi
+
+          echo "Release guard passed: target version v${TARGET_VERSION} is available."
+
+  build:
+    name: Build & verify
+    uses: ./.github/workflows/build.yml
+    with:
+      image-name: sample-nodejs
+      image-version: pr-${{ github.event.pull_request.number }}
+      push: false

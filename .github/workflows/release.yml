@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Serialize releases on main so concurrent merges cannot collide on versions/tags
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    name: Prepare release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Resolve version and sync chart metadata
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch origin --tags --quiet
+
+          CURR_VERSION=$(node -p "require('./package.json').version")
+          if git rev-parse -q --verify HEAD~1 >/dev/null; then
+            PREV_VERSION=$(git show HEAD~1:package.json | node -e "console.log(JSON.parse(require('fs').readFileSync(0, 'utf8')).version)")
+          else
+            PREV_VERSION=""
+          fi
+
+          if [ "$CURR_VERSION" = "$PREV_VERSION" ]; then
+            echo "Version unchanged in last commit ($CURR_VERSION); bumping patch version..."
+            npm version patch --no-git-tag-version >/dev/null
+            VERSION=$(node -p "require('./package.json').version")
+          else
+            echo "Version updated in last commit ($PREV_VERSION -> $CURR_VERSION)."
+            VERSION="$CURR_VERSION"
+          fi
+
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! [[ "$VERSION" =~ $SEMVER_RE ]]; then
+            echo "::error::Invalid semver version '$VERSION'"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Git tag v${VERSION} already exists!"
+            exit 1
+          fi
+
+          # Ensure package-lock.json matches package.json (in case of manual edit)
+          if [ "$(node -p "require('./package-lock.json').version")" != "$VERSION" ]; then
+            npm install --package-lock-only --ignore-scripts >/dev/null
+          fi
+
+          # Sync Helm Chart.yaml version and appVersion
+          RELEASE_VERSION="$VERSION" python3 - <<'EOF'
+          import os, pathlib, re
+
+          version = os.environ["RELEASE_VERSION"]
+          chart_path = pathlib.Path("charts/devops-demo/Chart.yaml")
+          content = chart_path.read_text()
+          content = re.sub(r"^version:\s*.*$", f"version: {version}", content, flags=re.MULTILINE)
+          content = re.sub(r"^appVersion:\s*.*$", f'appVersion: "{version}"', content, flags=re.MULTILINE)
+          chart_path.write_text(content)
+          EOF
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add package.json package-lock.json charts/devops-demo/Chart.yaml
+            git commit -m "chore(release): bump version to v${VERSION} [skip ci]"
+            git push origin HEAD:main
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    name: Build, test & push OCI artifacts
+    needs: prepare
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+      image-name: devops-demo
+      image-version: ${{ needs.prepare.outputs.version }}
+      push: true
+    secrets: inherit
+
+  gitops-and-tag:
+    name: Update k8s-resources & push Git tag
+    needs: [prepare, build-and-push]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout sample-nodejs at release commit
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Set up SSH agent for k8s-resources
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.K8S_RESOURCES_DEPLOY_KEY }}
+
+      - name: Update Argo CD application in k8s-resources
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          git clone --depth 1 --branch main git@github.com:ymagriso/k8s-resources.git ../k8s-resources
+          cd ../k8s-resources
+
+          RELEASE_VERSION="$VERSION" python3 - <<'EOF'
+          import os, pathlib, re
+
+          version = os.environ["RELEASE_VERSION"]
+          app_path = pathlib.Path("argocd/apps/devops-demo.yaml")
+          content = app_path.read_text()
+          content = re.sub(
+              r"^(\s*targetRevision:\s*).*$",
+              rf"\g<1>{version}",
+              content,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          content = re.sub(
+              r"^(\s*tag:\s*).*$",
+              rf"\g<1>{version}",
+              content,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          app_path.write_text(content)
+          EOF
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add argocd/apps/devops-demo.yaml
+            git commit -m "ci(devops-demo): release v${VERSION}"
+            git pull --rebase origin main
+            git push origin main
+          else
+            echo "k8s-resources already at version ${VERSION}"
+          fi
+
+      - name: Create and push release tag
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
