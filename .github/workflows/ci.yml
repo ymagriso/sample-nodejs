@@ -48,8 +48,9 @@ jobs:
           PR_VERSION=$(read_pkg_version "${PR_SHA}:package.json")
           PR_LOCK_VERSION=$(read_pkg_version "${PR_SHA}:package-lock.json")
 
-          if ! [[ "$PR_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::package.json version '$PR_VERSION' must follow x.y.z semver."
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! [[ "$PR_VERSION" =~ $SEMVER_RE ]]; then
+            echo "::error::package.json version '$PR_VERSION' must follow semver (x.y.z or x.y.z-prerelease)."
             exit 1
           fi
 
@@ -62,8 +63,12 @@ jobs:
             TARGET_VERSION="$PR_VERSION"
             echo "PR manually changed version: $ANCESTOR_VERSION -> $TARGET_VERSION (base is $BASE_VERSION)"
           else
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
-            TARGET_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            if [[ "$BASE_VERSION" == *-* ]]; then
+              TARGET_VERSION="${BASE_VERSION%%-*}"
+            else
+              IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+              TARGET_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            fi
             echo "PR left version unchanged ($ANCESTOR_VERSION); release on main ($BASE_VERSION) will bump to $TARGET_VERSION"
           fi
 
