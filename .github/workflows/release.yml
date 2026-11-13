@@ -103,7 +103,6 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/build.yml
     with:
-      ref: ${{ needs.prepare.outputs.sha }}
       image-name: devops-demo
       image-version: ${{ needs.prepare.outputs.version }}
       push: true
@@ -115,10 +114,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout sample-nodejs at release commit
+      - name: Checkout sample-nodejs
         uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
 
       - name: Set up SSH agent for k8s-resources
         uses: webfactory/ssh-agent@v0.10.0
@@ -173,9 +172,10 @@ jobs:
       - name: Create and push release tag
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-          TARGET_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
+          git fetch origin main --tags --quiet
+          TARGET_SHA=$(git rev-parse origin/main)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"

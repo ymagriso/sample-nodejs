@@ -3,11 +3,6 @@ name: Build & Verify
 on:
   workflow_call:
     inputs:
-      ref:
-        description: Git ref or SHA to check out (defaults to triggering SHA)
-        required: false
-        type: string
-        default: ''
       image-name:
         description: Container image name
         required: false
@@ -41,14 +36,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
+
+      - name: Sync release version in manifest
+        if: inputs.push
+        env:
+          IMAGE_VERSION: ${{ inputs.image-version }}
+        run: npm version "$IMAGE_VERSION" --no-git-tag-version --allow-same-version >/dev/null
 
       - name: Install dependencies
         run: npm ci
@@ -89,8 +88,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
+
+      - name: Sync release version in manifest
+        if: inputs.push
+        env:
+          IMAGE_VERSION: ${{ inputs.image-version }}
+        run: npm version "$IMAGE_VERSION" --no-git-tag-version --allow-same-version >/dev/null
 
       - name: Compute image metadata
         id: meta
@@ -170,8 +173,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.ref }}
+
+      - name: Sync release version in Chart.yaml
+        if: inputs.push
+        env:
+          IMAGE_VERSION: ${{ inputs.image-version }}
+        run: |
+          python3 - <<'EOF'
+          import os, pathlib, re
+
+          version = os.environ["IMAGE_VERSION"]
+          chart_path = pathlib.Path("charts/devops-demo/Chart.yaml")
+          content = chart_path.read_text()
+          content = re.sub(r"^version:\s*.*$", f"version: {version}", content, flags=re.MULTILINE)
+          content = re.sub(r"^appVersion:\s*.*$", f'appVersion: "{version}"', content, flags=re.MULTILINE)
+          chart_path.write_text(content)
+          EOF
 
       - name: Set up Helm
         uses: azure/setup-helm@v5.1.0
