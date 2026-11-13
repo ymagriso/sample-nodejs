@@ -3,6 +3,7 @@ npm-debug.log
 .git
 .github
 test
+charts
 Dockerfile
 .dockerignore
 README.md
