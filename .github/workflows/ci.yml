@@ -62,6 +62,9 @@ jobs:
           if [ "$PR_VERSION" != "$ANCESTOR_VERSION" ]; then
             TARGET_VERSION="$PR_VERSION"
             echo "PR manually changed version: $ANCESTOR_VERSION -> $TARGET_VERSION (base is $BASE_VERSION)"
+          elif ! git rev-parse -q --verify "refs/tags/v${BASE_VERSION}" >/dev/null; then
+            TARGET_VERSION="$BASE_VERSION"
+            echo "Base version v${BASE_VERSION} has no release tag yet; release on main will publish $TARGET_VERSION"
           else
             if [[ "$BASE_VERSION" == *-* ]]; then
               TARGET_VERSION="${BASE_VERSION%%-*}"
