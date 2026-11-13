@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 # Serialize releases on main so concurrent merges cannot collide on versions/tags
 concurrency:
@@ -45,9 +46,14 @@ jobs:
           fi
 
           if [ "$CURR_VERSION" = "$PREV_VERSION" ]; then
-            echo "Version unchanged in last commit ($CURR_VERSION); bumping patch version..."
-            npm version patch --no-git-tag-version >/dev/null
-            VERSION=$(node -p "require('./package.json').version")
+            if ! git rev-parse -q --verify "refs/tags/v${CURR_VERSION}" >/dev/null; then
+              echo "Current version v${CURR_VERSION} has not been tagged yet; releasing ${CURR_VERSION} without bumping."
+              VERSION="$CURR_VERSION"
+            else
+              echo "Version unchanged in last commit ($CURR_VERSION); bumping patch version..."
+              npm version patch --no-git-tag-version >/dev/null
+              VERSION=$(node -p "require('./package.json').version")
+            fi
           else
             echo "Version updated in last commit ($PREV_VERSION -> $CURR_VERSION)."
             VERSION="$CURR_VERSION"
