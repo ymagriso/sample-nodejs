@@ -1,0 +1,202 @@
+name: Build & Verify
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref or SHA to check out (defaults to triggering SHA)
+        required: false
+        type: string
+        default: ''
+      image-name:
+        description: Container image name
+        required: false
+        type: string
+        default: sample-nodejs
+      image-version:
+        description: Version string used for image tag and OCI version label
+        required: true
+        type: string
+      push:
+        description: Push built Docker image and Helm chart to the OCI registry
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CUSTOM_DOMAIN:
+        required: false
+      DOCKER_REGISTRY_USERNAME:
+        required: false
+      DOCKER_REGISTRY_PASSWORD:
+        required: false
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  build-and-test:
+    name: Lint, test & audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Smoke test (start server and probe endpoints)
+        env:
+          PORT: 8080
+        run: |
+          node app.js > server.log 2>&1 &
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:$PORT/ready > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:$PORT/ready   | grep -q '^Ready$'
+          curl -sf http://localhost:$PORT/live    | grep -q '^Alive$'
+          curl -sf http://localhost:$PORT/my-app  | grep -q 'Hello, World!'
+          curl -sf http://localhost:$PORT/metrics | grep -q 'root_access_total'
+          echo "Smoke test passed"
+
+      - name: Server logs
+        if: always()
+        run: cat server.log || true
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Compute image metadata
+        id: meta
+        env:
+          PUSH: ${{ inputs.push }}
+          CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+          IMAGE_VERSION: ${{ inputs.image-version }}
+        run: |
+          if [ "$PUSH" = "true" ]; then
+            if [ -z "$CUSTOM_DOMAIN" ]; then
+              echo "::error::CUSTOM_DOMAIN secret must be set when push=true."
+              exit 1
+            fi
+            echo "tag=registry.${CUSTOM_DOMAIN}/${IMAGE_NAME}:${IMAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${IMAGE_NAME}:${IMAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build image (local load for smoke test)
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.version=${{ inputs.image-version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container smoke test
+        env:
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker run -d --name app -p 8080:8080 "$IMAGE_TAG"
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8080/ready > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:8080/live | grep -q '^Alive$'
+          echo "Container smoke test passed"
+
+      - name: Container logs
+        if: always()
+        run: docker logs app || true
+
+      - name: Log in to OCI registry
+        if: inputs.push
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: registry.${{ secrets.CUSTOM_DOMAIN }}
+          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+      - name: Push image to OCI registry
+        if: inputs.push
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: true
+          load: false
+          tags: ${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.version=${{ inputs.image-version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  helm-build:
+    name: Helm chart build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build-and-test, docker-build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5.1.0
+
+      - name: Lint, template, and package Helm chart
+        run: |
+          helm lint charts/devops-demo
+          helm template devops-demo charts/devops-demo > /dev/null
+          mkdir -p /tmp/charts
+          helm package charts/devops-demo --destination /tmp/charts
+
+      - name: Log in to OCI chart registry
+        if: inputs.push
+        env:
+          REGISTRY_HOST: registry.${{ secrets.CUSTOM_DOMAIN }}
+          REGISTRY_USER: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          REGISTRY_PASS: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        run: |
+          echo "$REGISTRY_PASS" | helm registry login "$REGISTRY_HOST" \
+            --username "$REGISTRY_USER" \
+            --password-stdin
+
+      - name: Push Helm chart to OCI registry
+        if: inputs.push
+        env:
+          REGISTRY_HOST: registry.${{ secrets.CUSTOM_DOMAIN }}
+        run: |
+          helm push /tmp/charts/devops-demo-*.tgz "oci://${REGISTRY_HOST}/charts"
