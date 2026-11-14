@@ -8,3 +8,5 @@ Dockerfile
 .dockerignore
 README.md
 eslint.config.js
+trivy-*.json
+trivy-*.sarif

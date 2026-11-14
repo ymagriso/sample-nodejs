@@ -1,0 +1,101 @@
+name: "Trivy Security Scan (Image, Filesystem & IaC)"
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      fail_on_critical:
+        description: "Fail the workflow if fixable CRITICAL vulnerabilities, secrets, or IaC misconfigurations are found"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('trivy-pr-{0}', github.event.pull_request.number) || format('trivy-main-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  trivy-scan:
+    name: "Trivy Image, Filesystem & IaC Scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FAIL_ON_CRITICAL: ${{ github.event.inputs.fail_on_critical || 'false' }}
+      IMAGE_TAG: sample-nodejs:trivy-scan
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Trivy
+        uses: aquasecurity/setup-trivy@v0.3.1
+        with:
+          cache: true
+
+      - name: Scan Dockerfile & Helm Chart Misconfigurations (trivy config)
+        id: config_scan
+        run: python3 .github/scripts/trivy_config_scan.py
+
+      - name: Upload IaC Scan SARIF to GitHub Security Tab
+        # Upload SARIF on main/workflow_dispatch so PRs stay non-blocking
+        # while CodeQL merge protection is active.
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4.39.3
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-iac-config
+
+      - name: Scan Repository Filesystem & Lockfiles (trivy fs)
+        id: fs_scan
+        run: python3 .github/scripts/trivy_fs_scan.py
+
+      - name: Upload Filesystem Scan SARIF to GitHub Security Tab
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4.39.3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs-vuln
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build Container Image for Scanning
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Container Image with Trivy
+        id: image_scan
+        run: python3 .github/scripts/trivy_image_scan.py
+
+      - name: Upload Container Image Scan SARIF to GitHub Security Tab
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4.39.3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-container-image
+
+      - name: Enforce Critical Threshold (Optional Gate)
+        if: env.FAIL_ON_CRITICAL == 'true'
+        env:
+          CONFIG_CRITICAL: ${{ steps.config_scan.outputs.config_critical }}
+          FS_FIXABLE_CRITICAL: ${{ steps.fs_scan.outputs.fs_fixable_critical }}
+          FS_SECRETS: ${{ steps.fs_scan.outputs.fs_secrets }}
+          IMAGE_FIXABLE_CRITICAL: ${{ steps.image_scan.outputs.fixable_critical }}
+        run: |
+          if [ "${CONFIG_CRITICAL:-0}" -gt 0 ] || [ "${FS_FIXABLE_CRITICAL:-0}" -gt 0 ] || [ "${FS_SECRETS:-0}" -gt 0 ] || [ "${IMAGE_FIXABLE_CRITICAL:-0}" -gt 0 ]; then
+            echo "::error::Failing scan because FAIL_ON_CRITICAL=true (IaC critical=${CONFIG_CRITICAL}, FS fixable critical=${FS_FIXABLE_CRITICAL}, secrets=${FS_SECRETS}, image fixable critical=${IMAGE_FIXABLE_CRITICAL})."
+            exit 1
+          fi
