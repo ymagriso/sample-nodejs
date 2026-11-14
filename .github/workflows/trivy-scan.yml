@@ -5,10 +5,6 @@ on:
   push:
     branches:
       - main
-  schedule:
-    # Run daily at 10:00 Israel time to catch newly disclosed CVEs in base image and dependencies
-    - cron: "0 10 * * *"
-      timezone: "Asia/Jerusalem"
   workflow_dispatch:
     inputs:
       fail_on_critical:
@@ -48,7 +44,7 @@ jobs:
         run: python3 .github/scripts/trivy_config_scan.py
 
       - name: Upload IaC Scan SARIF to GitHub Security Tab
-        # Upload SARIF on main/schedule/workflow_dispatch so PRs stay non-blocking
+        # Upload SARIF on main/workflow_dispatch so PRs stay non-blocking
         # while CodeQL merge protection is active.
         if: github.event_name != 'pull_request'
         uses: github/codeql-action/upload-sarif@v4.39.3

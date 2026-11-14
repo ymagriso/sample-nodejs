@@ -42,11 +42,11 @@ GitHub Actions is split into a reusable build workflow and separate PR/release t
   2. **`build-and-push`:** Calls `build.yml` on the prepared commit with `push: true`.
   3. **`gitops-and-tag`:** Clones `ymagriso/k8s-resources` using an SSH Deploy Key (`K8S_RESOURCES_DEPLOY_KEY`), updates `targetRevision` and `image.tag` in `argocd/apps/devops-demo.yaml` directly on `main` for Argo CD reconciliation, and pushes an annotated Git tag `v<version>` pointing to the release commit.
 - **Trivy Security Scan ([.github/workflows/trivy-scan.yml](.github/workflows/trivy-scan.yml)):**
-  Runs on `pull_request`, `push` to `main`, daily at `10:00` (`Asia/Jerusalem`), and `workflow_dispatch`:
+  Runs on `pull_request`, `push` to `main`, and `workflow_dispatch`:
   1. **IaC & Containerfile Misconfigurations (`trivy config`):** Scans `Dockerfile` and `charts/devops-demo` for `HIGH`/`CRITICAL` misconfigurations via [`.github/scripts/trivy_config_scan.py`](.github/scripts/trivy_config_scan.py).
   2. **Filesystem & Lockfile Scan (`trivy fs`):** Scans `package-lock.json` and repository files for `HIGH`/`CRITICAL` dependency CVEs and secrets via [`.github/scripts/trivy_fs_scan.py`](.github/scripts/trivy_fs_scan.py).
   3. **Container Image Scan (`trivy image`):** Builds the Docker image locally (`sample-nodejs:trivy-scan`) and scans OS and Node.js packages for `HIGH`/`CRITICAL` CVEs via [`.github/scripts/trivy_image_scan.py`](.github/scripts/trivy_image_scan.py).
-  - **Report-Only PR Mode & CodeQL Compatibility:** Runs with `--exit-code 0` and writes Markdown tables + expandable `<details>` CVE breakdowns to the GitHub Actions Job Summary. SARIF uploads (`trivy-iac-config`, `trivy-fs-vuln`, `trivy-container-image`) run only on `main`, `schedule`, and `workflow_dispatch` so PRs are not blocked by CodeQL merge protection on unfixed upstream CVEs. Trigger `workflow_dispatch` with `fail_on_critical: true` to enforce blocking on fixable `CRITICAL` findings, secrets, or IaC misconfigurations.
+  - **Report-Only PR Mode & CodeQL Compatibility:** Runs with `--exit-code 0` and writes Markdown tables + expandable `<details>` CVE breakdowns to the GitHub Actions Job Summary. SARIF uploads (`trivy-iac-config`, `trivy-fs-vuln`, `trivy-container-image`) run only on `main` and `workflow_dispatch` so PRs are not blocked by CodeQL merge protection on unfixed upstream CVEs. Trigger `workflow_dispatch` with `fail_on_critical: true` to enforce blocking on fixable `CRITICAL` findings, secrets, or IaC misconfigurations.
 
 ### Required GitHub Secrets (`sample-nodejs`)
 
