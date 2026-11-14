@@ -56,6 +56,7 @@ GitHub Actions is split into a reusable build workflow and separate PR/release t
 | `DOCKER_REGISTRY_USERNAME` | OCI registry username |
 | `DOCKER_REGISTRY_PASSWORD` | OCI registry password |
 | `K8S_RESOURCES_DEPLOY_KEY` | SSH private key with write access to `ymagriso/k8s-resources` |
+| `RELEASE_DEPLOY_KEY` | SSH private deploy key with write access (and ruleset bypass) on `sample-nodejs` for automated version bump commits |
 
 ## Kubernetes Workload Design: `Deployment` vs. `StatefulSet`
 
