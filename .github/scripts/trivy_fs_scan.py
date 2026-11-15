@@ -56,8 +56,8 @@ def parse_secrets(report: dict) -> list[tuple[str, str, str, str, int]]:
     return secrets
 
 
-def summarize_fs_report(report: dict) -> tuple[str, int, int]:
-    """Build Markdown summary for Trivy fs report and return (summary, fixable_crit, secret_count)."""
+def summarize_fs_report(report: dict) -> tuple[str, dict[str, int]]:
+    """Build Markdown summary for Trivy fs report and return (summary, output_counts)."""
     crit, high, fixable, fixable_crit, vulns_list = parse_vulnerabilities(report)
     secrets = parse_secrets(report)
     targets = [res.get("Target", "") for res in (report.get("Results") or []) if res.get("Target")]
@@ -98,7 +98,13 @@ def summarize_fs_report(report: dict) -> tuple[str, int, int]:
     if not vulns_list and not secrets:
         lines.append("> ✅ No `HIGH` or `CRITICAL` dependency CVEs or leaked secrets detected.\n\n")
 
-    return "".join(lines), fixable_crit, len(secrets)
+    outputs = {
+        "fs_critical": crit,
+        "fs_high": high,
+        "fs_fixable_critical": fixable_crit,
+        "fs_secrets": len(secrets),
+    }
+    return "".join(lines), outputs
 
 
 def main() -> None:
@@ -107,14 +113,8 @@ def main() -> None:
     with open("trivy-fs.json", encoding="utf-8") as f:
         report = json.load(f)
 
-    summary_md, fixable_crit, secret_count = summarize_fs_report(report)
-    publish_summary_and_outputs(
-        summary_md,
-        {
-            "fs_fixable_critical": fixable_crit,
-            "fs_secrets": secret_count,
-        },
-    )
+    summary_md, outputs = summarize_fs_report(report)
+    publish_summary_and_outputs(summary_md, outputs)
 
 
 if __name__ == "__main__":

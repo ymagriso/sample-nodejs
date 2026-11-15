@@ -3,6 +3,15 @@ name: Release
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+      - "eslint.config.js"
+      - "test/**"
+      - ".github/scripts/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/trivy-scan.yml"
+      - ".github/workflows/release.yml"
 
 # Serialize releases on main so concurrent merges cannot collide on versions/tags
 concurrency:

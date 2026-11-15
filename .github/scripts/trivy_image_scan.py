@@ -36,8 +36,8 @@ def run_trivy_image(
     )
 
 
-def summarize_image_report(image: str, report: dict) -> tuple[str, int]:
-    """Build Markdown summary for the scanned container image and return (summary, fixable_crit)."""
+def summarize_image_report(image: str, report: dict) -> tuple[str, dict[str, int]]:
+    """Build Markdown summary for the scanned container image and return (summary, output_counts)."""
     crit, high, fixable, fixable_crit, vulns_list = parse_vulnerabilities(report)
 
     status = (
@@ -71,7 +71,12 @@ def summarize_image_report(image: str, report: dict) -> tuple[str, int]:
     else:
         lines.append("> ✅ No `HIGH` or `CRITICAL` vulnerabilities detected in the container image.\n\n")
 
-    return "".join(lines), fixable_crit
+    outputs = {
+        "image_critical": crit,
+        "image_high": high,
+        "fixable_critical": fixable_crit,
+    }
+    return "".join(lines), outputs
 
 
 def main() -> None:
@@ -81,8 +86,8 @@ def main() -> None:
     with open("trivy-image.json", encoding="utf-8") as f:
         report = json.load(f)
 
-    summary_md, fixable_crit = summarize_image_report(image, report)
-    publish_summary_and_outputs(summary_md, {"fixable_critical": fixable_crit})
+    summary_md, outputs = summarize_image_report(image, report)
+    publish_summary_and_outputs(summary_md, outputs)
 
 
 if __name__ == "__main__":
