@@ -37,7 +37,7 @@ GitHub Actions is split into a reusable build workflow and separate PR/release t
   - `release-guard`: Validates `x.y.z` semver in `package.json`, ensures `package-lock.json` matches, and checks that the target release tag (`v<version>`) does not already exist.
   - `build`: Calls `build.yml` with `push: false` to verify code, container image, and Helm chart packaging before merge.
 - **Release Pipeline ([.github/workflows/release.yml](.github/workflows/release.yml)):**
-  Triggered on push to `main`:
+  Triggered on push to `main` (skipping docs, tests, lint config, and CI/security workflow-only changes via `paths-ignore`):
   1. **`prepare`:** Checks if `package.json` `.version` was updated in the last commit. If unchanged, increments the patch version (`x.y.z -> x.y.(z+1)` via `npm version patch`), syncs `charts/devops-demo/Chart.yaml` (`version` and `appVersion`), and pushes a `[skip ci]` commit to `main`.
   2. **`build-and-push`:** Calls `build.yml` on the prepared commit with `push: true`.
   3. **`gitops-and-tag`:** Clones `ymagriso/k8s-resources` using an SSH Deploy Key (`K8S_RESOURCES_DEPLOY_KEY`), updates `targetRevision` and `image.tag` in `argocd/apps/devops-demo.yaml` directly on `main` for Argo CD reconciliation, and pushes an annotated Git tag `v<version>` pointing to the release commit.
