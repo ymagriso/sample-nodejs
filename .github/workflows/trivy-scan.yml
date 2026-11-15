@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      fail_on_high_or_critical:
+        description: "Fail the workflow if any HIGH or CRITICAL findings (vulnerabilities, secrets, or IaC misconfigurations) are found"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -28,6 +33,7 @@ jobs:
     timeout-minutes: 15
     env:
       FAIL_ON_CRITICAL: ${{ github.event.inputs.fail_on_critical || 'false' }}
+      FAIL_ON_HIGH_OR_CRITICAL: ${{ github.event.inputs.fail_on_high_or_critical || 'false' }}
       IMAGE_TAG: sample-nodejs:trivy-scan
 
     steps:
@@ -44,8 +50,8 @@ jobs:
         run: python3 .github/scripts/trivy_config_scan.py
 
       - name: Upload IaC Scan SARIF to GitHub Security Tab
-        # Upload SARIF on main/workflow_dispatch so PRs stay non-blocking
-        # while CodeQL merge protection is active.
+        # Upload SARIF only on main/workflow_dispatch; PR blocking is enforced
+        # directly by the HIGH & CRITICAL gate step below.
         if: github.event_name != 'pull_request'
         uses: github/codeql-action/upload-sarif@v4.39.3
         with:
@@ -87,8 +93,30 @@ jobs:
           sarif_file: trivy-image.sarif
           category: trivy-container-image
 
+      - name: Enforce HIGH & CRITICAL Threshold (PR Gate)
+        if: github.event_name == 'pull_request' || env.FAIL_ON_HIGH_OR_CRITICAL == 'true'
+        env:
+          CONFIG_CRITICAL: ${{ steps.config_scan.outputs.config_critical }}
+          CONFIG_HIGH: ${{ steps.config_scan.outputs.config_high }}
+          FS_CRITICAL: ${{ steps.fs_scan.outputs.fs_critical }}
+          FS_HIGH: ${{ steps.fs_scan.outputs.fs_high }}
+          FS_SECRETS: ${{ steps.fs_scan.outputs.fs_secrets }}
+          IMAGE_CRITICAL: ${{ steps.image_scan.outputs.image_critical }}
+          IMAGE_HIGH: ${{ steps.image_scan.outputs.image_high }}
+        run: |
+          if [ "${CONFIG_CRITICAL:-0}" -gt 0 ] \
+            || [ "${CONFIG_HIGH:-0}" -gt 0 ] \
+            || [ "${FS_CRITICAL:-0}" -gt 0 ] \
+            || [ "${FS_HIGH:-0}" -gt 0 ] \
+            || [ "${FS_SECRETS:-0}" -gt 0 ] \
+            || [ "${IMAGE_CRITICAL:-0}" -gt 0 ] \
+            || [ "${IMAGE_HIGH:-0}" -gt 0 ]; then
+            echo "::error::Blocking PR because Trivy detected HIGH or CRITICAL findings (IaC: ${CONFIG_CRITICAL:-0} critical / ${CONFIG_HIGH:-0} high; FS: ${FS_CRITICAL:-0} critical / ${FS_HIGH:-0} high / ${FS_SECRETS:-0} secrets; Image: ${IMAGE_CRITICAL:-0} critical / ${IMAGE_HIGH:-0} high). See the workflow Job Summary for details."
+            exit 1
+          fi
+
       - name: Enforce Critical Threshold (Optional Gate)
-        if: env.FAIL_ON_CRITICAL == 'true'
+        if: github.event_name != 'pull_request' && env.FAIL_ON_HIGH_OR_CRITICAL != 'true' && env.FAIL_ON_CRITICAL == 'true'
         env:
           CONFIG_CRITICAL: ${{ steps.config_scan.outputs.config_critical }}
           FS_FIXABLE_CRITICAL: ${{ steps.fs_scan.outputs.fs_fixable_critical }}
@@ -96,6 +124,6 @@ jobs:
           IMAGE_FIXABLE_CRITICAL: ${{ steps.image_scan.outputs.fixable_critical }}
         run: |
           if [ "${CONFIG_CRITICAL:-0}" -gt 0 ] || [ "${FS_FIXABLE_CRITICAL:-0}" -gt 0 ] || [ "${FS_SECRETS:-0}" -gt 0 ] || [ "${IMAGE_FIXABLE_CRITICAL:-0}" -gt 0 ]; then
-            echo "::error::Failing scan because FAIL_ON_CRITICAL=true (IaC critical=${CONFIG_CRITICAL}, FS fixable critical=${FS_FIXABLE_CRITICAL}, secrets=${FS_SECRETS}, image fixable critical=${IMAGE_FIXABLE_CRITICAL})."
+            echo "::error::Failing scan because FAIL_ON_CRITICAL=true (IaC critical=${CONFIG_CRITICAL:-0}, FS fixable critical=${FS_FIXABLE_CRITICAL:-0}, secrets=${FS_SECRETS:-0}, image fixable critical=${IMAGE_FIXABLE_CRITICAL:-0})."
             exit 1
           fi

@@ -89,8 +89,14 @@ def main() -> None:
     with open("trivy-config.json", encoding="utf-8") as f:
         data = json.load(f)
 
-    summary_md, crit_count, _ = summarize_config_report(data, scanned_items)
-    publish_summary_and_outputs(summary_md, {"config_critical": crit_count})
+    summary_md, crit_count, high_count = summarize_config_report(data, scanned_items)
+    publish_summary_and_outputs(
+        summary_md,
+        {
+            "config_critical": crit_count,
+            "config_high": high_count,
+        },
+    )
 
 
 if __name__ == "__main__":
