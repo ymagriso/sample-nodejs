@@ -21,9 +21,6 @@ updates:
       interval: "daily"
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 7
-      semver-patch-days: 3
     groups:
       github-actions:
         patterns:
@@ -37,9 +34,6 @@ updates:
       interval: "daily"
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 7
-      semver-patch-days: 3
     ignore:
       # Keep Node major version aligned with NODE_VERSION: '22' in CI/CD workflows
       - dependency-name: "node"
