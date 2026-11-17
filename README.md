@@ -58,6 +58,15 @@ GitHub Actions is split into a reusable build workflow and separate PR/release t
 | `K8S_RESOURCES_DEPLOY_KEY` | SSH private key with write access to `ymagriso/k8s-resources` |
 | `RELEASE_DEPLOY_KEY` | SSH private deploy key with write access (and ruleset bypass) on `sample-nodejs` for automated version bump commits |
 
+## Why Two Separate Repositories
+
+This setup splits application code (`ymagriso/sample-nodejs`) from cluster infrastructure and GitOps state ([`ymagriso/k8s-resources`](https://github.com/ymagriso/k8s-resources)) for four reasons:
+
+- **Clear Ownership**: `sample-nodejs` holds application code, container builds, and the `devops-demo` Helm chart. `k8s-resources` holds OpenTofu stacks, cluster bootstrap scripts, and Argo CD manifests.
+- **Independent Triggers**: Application changes never trigger infrastructure workflows in `k8s-resources` or clutter GitOps history. Cluster changes never run Node.js builds or image pushes.
+- **Least-Privilege Security**: `sample-nodejs` CI holds only OCI registry credentials and `K8S_RESOURCES_DEPLOY_KEY` to update `argocd/apps/devops-demo.yaml`. It holds no GCP, Cloudflare, or cluster-admin access.
+- **Clean Release Handoff**: `release.yml` pushes immutable OCI image and chart artifacts first, then bumps `targetRevision` and `image.tag` in `k8s-resources` for Argo CD.
+
 ## Kubernetes Workload Design: `Deployment` vs. `StatefulSet`
 
 The Helm chart ([charts/devops-demo](charts/devops-demo)) deploys the application as a **`Deployment`** with `replicaCount: 1` (and `RollingUpdate` with `maxSurge: 1`, `maxUnavailable: 0`).
