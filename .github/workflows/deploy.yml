@@ -1,0 +1,79 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to deploy (e.g., 1.0.4 or v1.0.4)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: Release version to deploy (without leading v)
+        required: true
+        type: string
+    secrets:
+      CUSTOM_DOMAIN:
+        required: true
+      DOCKER_REGISTRY_USERNAME:
+        required: true
+      DOCKER_REGISTRY_PASSWORD:
+        required: true
+      K8S_RESOURCES_DEPLOY_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Validate & deploy to k8s-resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-devops-demo
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout sample-nodejs
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Normalize and validate version tag
+        id: version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: .github/scripts/validate-deploy-version.sh
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5.1.0
+
+      - name: Log in to OCI registry (Docker)
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: registry.${{ secrets.CUSTOM_DOMAIN }}
+          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+      - name: Validate OCI artifacts exist in registry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REGISTRY_HOST: registry.${{ secrets.CUSTOM_DOMAIN }}
+          REGISTRY_USER: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          REGISTRY_PASS: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        run: .github/scripts/validate-deploy-oci.sh
+
+      - name: Checkout k8s-resources
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ymagriso/k8s-resources
+          path: k8s-resources
+          ssh-key: ${{ secrets.K8S_RESOURCES_DEPLOY_KEY }}
+
+      - name: Update Argo CD application in k8s-resources
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/update-k8s-resources.sh k8s-resources

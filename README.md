@@ -38,9 +38,15 @@ GitHub Actions is split into a reusable build workflow and separate PR/release t
   - `build`: Calls `build.yml` with `push: false` to verify code, container image, and Helm chart packaging before merge.
 - **Release Pipeline ([.github/workflows/release.yml](.github/workflows/release.yml)):**
   Triggered on push to `main` (skipping docs, tests, lint config, and CI/security workflow-only changes via `paths-ignore`):
-  1. **`prepare`:** Checks if `package.json` `.version` was updated in the last commit. If unchanged, increments the patch version (`x.y.z -> x.y.(z+1)` via `npm version patch`), syncs `charts/devops-demo/Chart.yaml` (`version` and `appVersion`), and pushes a `[skip ci]` commit to `main`.
-  2. **`build-and-push`:** Calls `build.yml` on the prepared commit with `push: true`.
-  3. **`gitops-and-tag`:** Clones `ymagriso/k8s-resources` using an SSH Deploy Key (`K8S_RESOURCES_DEPLOY_KEY`), updates `targetRevision` and `image.tag` in `argocd/apps/devops-demo.yaml` directly on `main` for Argo CD reconciliation, and pushes an annotated Git tag `v<version>` pointing to the release commit.
+  1. **`prepare`:** On attempt 1, bumps the patch version (`x.y.z -> x.y.(z+1)`) if `package.json` did not change, syncs `charts/devops-demo/Chart.yaml`, and pushes a `[skip ci]` commit to `main`. On workflow re-runs (`github.run_attempt > 1`), resolves the release version without a new bump push.
+  2. **`build-and-push`:** Calls `build.yml` with `push: true`.
+  3. **`tag`:** Pushes an annotated Git tag `v<version>` for the release commit (and skips if that tag already exists on a re-run).
+  4. **`deploy` / `deploy-skipped`:** On attempt 1, calls `deploy.yml` to update `ymagriso/k8s-resources`. On re-runs (`github.run_attempt > 1`), skips `deploy` and writes a summary notice.
+- **Deploy Workflow ([.github/workflows/deploy.yml](.github/workflows/deploy.yml)):**
+  Triggered via `workflow_dispatch` (free-text `version` input, e.g. `1.0.4` or `v1.0.4`) or `workflow_call` from `release.yml`:
+  1. Removes any `v` prefix, enforces semver format, and checks that Git tag `v<version>` exists in `sample-nodejs`.
+  2. Logs in to `registry.<CUSTOM_DOMAIN>` and verifies both the container image and Helm OCI chart exist (if absent, fails with a summary hint to re-run `Release` for `v<version>`).
+  3. Clones `ymagriso/k8s-resources` via `K8S_RESOURCES_DEPLOY_KEY`, updates `targetRevision` and `image.tag` in `argocd/apps/devops-demo.yaml`, and pushes to `main`.
 - **Trivy Security Scan ([.github/workflows/trivy-scan.yml](.github/workflows/trivy-scan.yml)):**
   Runs on `pull_request`, `push` to `main`, and `workflow_dispatch`:
   1. **IaC & Containerfile Misconfigurations (`trivy config`):** Scans `Dockerfile` and `charts/devops-demo` for `HIGH`/`CRITICAL` misconfigurations via [`.github/scripts/trivy_config_scan.py`](.github/scripts/trivy_config_scan.py).
