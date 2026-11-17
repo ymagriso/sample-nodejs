@@ -14,6 +14,7 @@ on:
       - ".github/workflows/ci.yml"
       - ".github/workflows/trivy-scan.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/deploy.yml"
 
 # Serialize releases on main so concurrent merges cannot collide on versions/tags
 concurrency:
@@ -45,9 +46,11 @@ jobs:
 
       - name: Resolve version and sync chart metadata
         id: version
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          git fetch origin --tags --quiet
+          git fetch origin main --tags --quiet
 
           CURR_VERSION=$(node -p "require('./package.json').version")
           if git rev-parse -q --verify HEAD~1 >/dev/null; then
@@ -56,7 +59,10 @@ jobs:
             PREV_VERSION=""
           fi
 
-          if [ "$CURR_VERSION" = "$PREV_VERSION" ]; then
+          if [ "$CURR_VERSION" != "$PREV_VERSION" ]; then
+            echo "Version updated in last commit ($PREV_VERSION -> $CURR_VERSION)."
+            VERSION="$CURR_VERSION"
+          elif [ "$RUN_ATTEMPT" = "1" ]; then
             if ! git rev-parse -q --verify "refs/tags/v${CURR_VERSION}" >/dev/null; then
               echo "Current version v${CURR_VERSION} has not been tagged yet; releasing ${CURR_VERSION} without bumping."
               VERSION="$CURR_VERSION"
@@ -66,8 +72,16 @@ jobs:
               VERSION=$(node -p "require('./package.json').version")
             fi
           else
-            echo "Version updated in last commit ($PREV_VERSION -> $CURR_VERSION)."
-            VERSION="$CURR_VERSION"
+            if git rev-parse -q --verify "refs/tags/v${CURR_VERSION}" >/dev/null \
+              && git rev-parse -q --verify HEAD~1 >/dev/null \
+              && git merge-base --is-ancestor "refs/tags/v${CURR_VERSION}^{commit}" HEAD~1; then
+              echo "Re-run detected: previous version v${CURR_VERSION} was tagged before this commit; resolving patch bump..."
+              npm version patch --no-git-tag-version >/dev/null
+              VERSION=$(node -p "require('./package.json').version")
+            else
+              echo "Re-run detected: keeping commit version ${CURR_VERSION}."
+              VERSION="$CURR_VERSION"
+            fi
           fi
 
           SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
@@ -76,7 +90,7 @@ jobs:
             exit 1
           fi
 
-          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+          if [ "$RUN_ATTEMPT" = "1" ] && git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
             echo "::error::Git tag v${VERSION} already exists!"
             exit 1
           fi
@@ -98,16 +112,33 @@ jobs:
           chart_path.write_text(content)
           EOF
 
-          if [ -n "$(git status --porcelain)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add package.json package-lock.json charts/devops-demo/Chart.yaml
-            git commit -m "chore(release): bump version to v${VERSION} [skip ci]"
-            git push origin HEAD:main
+          RELEASE_SHA=""
+          if [ "$RUN_ATTEMPT" != "1" ]; then
+            if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+              RELEASE_SHA=$(git rev-list -n 1 "refs/tags/v${VERSION}")
+              echo "Re-run: tag v${VERSION} already exists at ${RELEASE_SHA}; skipping main bump push."
+            else
+              EXISTING_BUMP=$(git log origin/main --grep="chore(release): bump version to v${VERSION}" -n 1 --format=%H || true)
+              if [ -n "$EXISTING_BUMP" ]; then
+                RELEASE_SHA="$EXISTING_BUMP"
+                echo "Re-run: version bump commit ${RELEASE_SHA} already exists on origin/main; skipping push."
+              fi
+            fi
+          fi
+
+          if [ -z "$RELEASE_SHA" ]; then
+            if [ -n "$(git status --porcelain)" ]; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add package.json package-lock.json charts/devops-demo/Chart.yaml
+              git commit -m "chore(release): bump version to v${VERSION} [skip ci]"
+              git push origin HEAD:main
+            fi
+            RELEASE_SHA=$(git rev-parse HEAD)
           fi
 
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=${RELEASE_SHA}" >> "$GITHUB_OUTPUT"
 
   build-and-push:
     name: Build, test & push OCI artifacts
@@ -119,8 +150,8 @@ jobs:
       push: true
     secrets: inherit
 
-  gitops-and-tag:
-    name: Update k8s-resources & push Git tag
+  tag:
+    name: Create release Git tag
     needs: [prepare, build-and-push]
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -129,65 +160,50 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Set up SSH agent for k8s-resources
-        uses: webfactory/ssh-agent@v0.10.0
-        with:
-          ssh-private-key: ${{ secrets.K8S_RESOURCES_DEPLOY_KEY }}
-
-      - name: Update Argo CD application in k8s-resources
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
-
-          git clone --depth 1 --branch main git@github.com:ymagriso/k8s-resources.git ../k8s-resources
-          cd ../k8s-resources
-
-          RELEASE_VERSION="$VERSION" python3 - <<'EOF'
-          import os, pathlib, re
-
-          version = os.environ["RELEASE_VERSION"]
-          app_path = pathlib.Path("argocd/apps/devops-demo.yaml")
-          content = app_path.read_text()
-          content = re.sub(
-              r"^(\s*targetRevision:\s*).*$",
-              rf"\g<1>{version}",
-              content,
-              count=1,
-              flags=re.MULTILINE,
-          )
-          content = re.sub(
-              r"^(\s*tag:\s*).*$",
-              rf"\g<1>{version}",
-              content,
-              count=1,
-              flags=re.MULTILINE,
-          )
-          app_path.write_text(content)
-          EOF
-
-          if [ -n "$(git status --porcelain)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add argocd/apps/devops-demo.yaml
-            git commit -m "ci(devops-demo): release v${VERSION}"
-            git pull --rebase origin main
-            git push origin main
-          else
-            echo "k8s-resources already at version ${VERSION}"
-          fi
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
       - name: Create and push release tag
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+          TARGET_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
           set -euo pipefail
-          git fetch origin main --tags --quiet
-          TARGET_SHA=$(git rev-parse origin/main)
+          git fetch origin --tags --quiet
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "Git tag v${VERSION} already exists; skipping tag creation."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "v${VERSION}" "${TARGET_SHA}" -m "Release v${VERSION}"
           git push origin "v${VERSION}"
+
+  deploy:
+    name: Deploy to k8s-resources
+    needs: [prepare, build-and-push, tag]
+    if: github.run_attempt == '1'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+    secrets: inherit
+
+  deploy-skipped:
+    name: Deploy status (re-run)
+    needs: [prepare, build-and-push, tag]
+    if: github.run_attempt != '1' && needs.tag.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Write deploy-skipped notice
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          {
+            echo "### Deploy Skipped on Re-Run"
+            echo ""
+            echo "Skipped the deploy job on workflow re-run (attempt \`${ATTEMPT}\`) for version \`v${VERSION}\`."
+            echo "OCI artifacts were rebuilt and pushed to the private registry."
+            echo ""
+            echo "Run the **Deploy** workflow manually with version \`${VERSION}\` if you want to deploy this release to \`k8s-resources\`."
+          } >> "$GITHUB_STEP_SUMMARY"

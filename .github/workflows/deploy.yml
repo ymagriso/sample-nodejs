@@ -1,0 +1,196 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to deploy (e.g., 1.0.4 or v1.0.4)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: Release version to deploy (without leading v)
+        required: true
+        type: string
+    secrets:
+      CUSTOM_DOMAIN:
+        required: true
+      DOCKER_REGISTRY_USERNAME:
+        required: true
+      DOCKER_REGISTRY_PASSWORD:
+        required: true
+      K8S_RESOURCES_DEPLOY_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Validate & deploy to k8s-resources
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-devops-demo
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout sample-nodejs
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Normalize and validate version tag
+        id: version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION=$(printf '%s' "$RAW_VERSION" | xargs)
+          VERSION="${VERSION#v}"
+
+          SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! [[ "$VERSION" =~ $SEMVER_RE ]]; then
+            echo "::error::Invalid version '${RAW_VERSION}'. Provide semver such as 1.0.4 or v1.0.4."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### Deploy Failed: Invalid Version"
+                echo ""
+                echo "Provided value \`${RAW_VERSION}\` does not match semver (\`x.y.z\` or \`vx.y.z\`)."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 1
+          fi
+
+          git fetch origin --tags --quiet
+          if ! git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Git tag v${VERSION} does not exist in sample-nodejs."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### Deploy Failed: Tag Not Found"
+                echo ""
+                echo "Git tag \`v${VERSION}\` does not exist in \`sample-nodejs\`."
+                echo ""
+                echo "Check available release tags or merge changes to \`main\` to run \`Release\` first."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5.1.0
+
+      - name: Log in to OCI registry (Docker)
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: registry.${{ secrets.CUSTOM_DOMAIN }}
+          username: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+      - name: Validate OCI artifacts exist in registry
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REGISTRY_HOST: registry.${{ secrets.CUSTOM_DOMAIN }}
+          REGISTRY_USER: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+          REGISTRY_PASS: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$REGISTRY_HOST" ] || [ "$REGISTRY_HOST" = "registry." ]; then
+            echo "::error::CUSTOM_DOMAIN secret is required."
+            exit 1
+          fi
+
+          echo "$REGISTRY_PASS" | helm registry login "$REGISTRY_HOST" \
+            --username "$REGISTRY_USER" \
+            --password-stdin
+
+          IMAGE_OK=true
+          CHART_OK=true
+
+          if ! docker manifest inspect "${REGISTRY_HOST}/devops-demo:${VERSION}" >/dev/null 2>&1; then
+            IMAGE_OK=false
+          fi
+
+          mkdir -p /tmp/helm-verify
+          if ! helm pull "oci://${REGISTRY_HOST}/charts/devops-demo" --version "${VERSION}" --destination /tmp/helm-verify >/dev/null 2>&1; then
+            CHART_OK=false
+          fi
+
+          if [ "$IMAGE_OK" != "true" ] || [ "$CHART_OK" != "true" ]; then
+            echo "::error::OCI artifact check failed for v${VERSION} (image_ok=${IMAGE_OK}, chart_ok=${CHART_OK})."
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "### Deploy Failed: Missing OCI Artifacts for \`v${VERSION}\`"
+                echo ""
+                echo "Git tag \`v${VERSION}\` exists, but the private registry lacks one or more artifacts:"
+                echo "- Container image (\`devops-demo:${VERSION}\`): \`${IMAGE_OK}\`"
+                echo "- Helm chart (\`charts/devops-demo:${VERSION}\`): \`${CHART_OK}\`"
+                echo ""
+                echo "Re-run the **Release** workflow for \`v${VERSION}\` (and ensure cluster VMs are running) to push the OCI artifacts, then retry **Deploy**."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 1
+          fi
+
+      - name: Set up SSH agent for k8s-resources
+        uses: webfactory/ssh-agent@v0.10.0
+        with:
+          ssh-private-key: ${{ secrets.K8S_RESOURCES_DEPLOY_KEY }}
+
+      - name: Update Argo CD application in k8s-resources
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          git clone --depth 1 --branch main git@github.com:ymagriso/k8s-resources.git ../k8s-resources
+          cd ../k8s-resources
+
+          RELEASE_VERSION="$VERSION" python3 - <<'EOF'
+          import os, pathlib, re
+
+          version = os.environ["RELEASE_VERSION"]
+          app_path = pathlib.Path("argocd/apps/devops-demo.yaml")
+          content = app_path.read_text()
+          content = re.sub(
+              r"^(\s*targetRevision:\s*).*$",
+              rf"\g<1>{version}",
+              content,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          content = re.sub(
+              r"^(\s*tag:\s*).*$",
+              rf"\g<1>{version}",
+              content,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          app_path.write_text(content)
+          EOF
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add argocd/apps/devops-demo.yaml
+            git commit -m "ci(devops-demo): release v${VERSION}"
+            git pull --rebase origin main
+            git push origin main
+            STATUS_MSG="Updated \`argocd/apps/devops-demo.yaml\` in \`ymagriso/k8s-resources\` to \`${VERSION}\`."
+          else
+            echo "k8s-resources already at version ${VERSION}"
+            STATUS_MSG="\`ymagriso/k8s-resources\` is already at version \`${VERSION}\`."
+          fi
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Deploy Complete"
+              echo ""
+              echo "$STATUS_MSG"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
